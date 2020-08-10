@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+
+class read:
+    def __init__(self,r,l,c,s,a,ja,cj,ds,acs):
+        self.id = r
+        self.length = l
+        self.chrom = c
+        self.strand = s
+        self.axis = a
+        self.junction = ja
+        self.right_j = cj
+        self.donor = ds
+        self.acceptor = acs
+
+     
+class overlap_cluster:
+    def __init__(self,c,s,cr,gr,rs):
+        self.chrom = c
+        self.strands = s
+        self.cover_range = cr
+        self.genes_range = gr
+        self.genes_reads = rs
+
+
+class gene:
+    def __init__(self,c,s,g,r):
+        self.chrom = c
+        self.strand = s
+        self.gene_range = g
+        self.reads = r
+
+
+class gene_transcripts:
+    def __init__(self,c,s,trs):
+        self.chrom = c
+        self.strand = s
+        self.trans_reads = trs
+
+def correct_dn_ac(dn_str,ac_str):
+    if not dn_str:
+        return 0,0
+    dn_l = dn_str.split(',')
+    ac_l = ac_str.split(',')
+    allsite = len(dn_l) + len(ac_l)
+    correct = 0
+    for d in dn_l:
+        if d in correct_dn_ac.right_donor:
+            correct += 1
+    for a in ac_l:
+        if a in correct_dn_ac.right_acceptor:
+            correct += 1
+    return allsite,correct
+
+def overlap_genes(cover_og,read_d_og):
+    read_range = [read_d_og.axis[0],read_d_og.axis[-1]]
+    if cover_og:
+        if cover_og.chrom == read_d_og.chrom and read_range[0] <= cover_og.cover_range[1] and read_range[1] >= cover_og.cover_range[0]:
+            cover_og.cover_range = [min(read_range[0],cover_og.cover_range[0]),max(read_range[1],cover_og.cover_range[1])]
+            ind = True
+            for idx in range(len(cover_og.strands)):
+                if read_d_og.strand == cover_og.strands[idx] and read_range[0] <= cover_og.genes_range[idx][1] and read_range[1] >= cover_og.genes_range[idx][0]:
+                    cover_og.genes_range[idx] = [min(read_range[0],cover_og.genes_range[idx][0]),max(read_range[1],cover_og.genes_range[idx][1])]
+                    cover_og.genes_reads[idx].append(read_d_og)
+                    ind = False
+                    break
+            if ind:
+                cover_og.strands.append(read_d_og.strand)
+                cover_og.genes_range.append(read_range)
+                cover_og.genes_reads.append([read_d_og])
+            return True,cover_og
+        else:
+            return False,cover_og
+    else:
+        cover_og = overlap_cluster(read_d_og.chrom,[read_d_og.strand],read_range,[read_range],[[read_d_og]])
+        return True,cover_og
+
+
+def oc_to_gc(cover_c):
+    gene_l = []
+    for g_idx in range(len(cover_c.strands)):
+        gene_d = gene(cover_c.chrom,cover_c.strands[g_idx],cover_c.genes_range[g_idx],cover_c.genes_reads[g_idx])
+        gene_l.append(gene_d)
+    return gene_l
+
+
+def intro_err_del(read_li,mis):
+    for read_d_ied in read_li:
+        site_num = len(read_d_ied.axis)
+        if site_num >= 4:
+            for idx in range(site_num-2,0,-2):
+                if (read_d_ied.axis[idx] - read_d_ied.axis[idx -1]) < mis:
+                    del read_d_ied.axis[idx]
+                    del read_d_ied.axis[idx - 1]
+    return read_li
+
+def sort_reads(read_ls):
+    sort_info = []
+    for idx in range(len(read_ls)):
+        read_d_sr = read_ls[idx]
+        sort_info.append([len(read_d_sr.axis),read_d_sr.right_j - read_d_sr.junction,read_d_sr.length,idx])
+    sort_info.sort(reverse = True)
+    sort_l = []
+    for i in sort_info:
+        sort_l.append(read_ls[i[3]])
+    return sort_l
+
+
+def trans_read_cluster(trans_read,que_read,ebt,ibt):
+    if abs(trans_read.axis[0] - que_read.axis[0]) > ebt:
+        return False
+    elif len(que_read.axis) > len(trans_read.axis):
+        trans_read_cluster(que_read,trans_read,ebt,ibt)
+    else:
+        min_num_of_intron_site = len(que_read.axis) - 1
+        for idx in range(1,min_num_of_intron_site):
+            if abs(que_read.axis[idx] - trans_read.axis[idx]) > ibt:
+                return False
+        if len(que_read.axis) != len(trans_read.axis): #for i2HQ_B722_c18212_f4p5_2424
+            tail_len = abs(trans_read.axis[min_num_of_intron_site] - trans_read.axis[min_num_of_intron_site - 1]) + ibt 
+            if abs(que_read.axis[min_num_of_intron_site] - trans_read.axis[min_num_of_intron_site - 1]) > tail_len:
+                return False
+    return True
+
+def cluster_trans(gene_c,mis,ebt,ibt):
+    reads_clean = intro_err_del(gene_c.reads,mis)
+    reads_sort = sort_reads(reads_clean)
+    for idx in range(len(reads_sort)):
+        if reads_sort[idx].strand == '+':
+            reads_sort[idx].axis = reads_sort[idx].axis[::-1]
+    trans_reads = [[reads_sort[0]]]
+    for read_d_ct in reads_sort[1:]:
+        ind = True
+        for tran in trans_reads:
+            tran_d = tran[0]
+            if trans_read_cluster(tran_d,read_d_ct,ebt,ibt):
+                tran.append(read_d_ct)
+                ind = False
+                break
+        if ind:
+            trans_reads.append([read_d_ct])
+    return gene_transcripts(gene_c.chrom,gene_c.strand,trans_reads)
+
+
+def read_cluster(infile,outfile,mis,ebt,ibt):
+    print("bam_parser file: {}".format(infile))
+    print("Cluster output file: {}".format(outfile))
+    with open(infile,'r') as fin, open(outfile,'w') as fout:
+        fout.write('read_id\tread_length\tgene_id\tgene_abundance\tisoform_id\tisoform_aboundance\tnumber_of_exons\tDonor\tAcceptor\n')
+        oc_cover = ''
+        read_n = 0
+        gene_n = 0
+        trans_n = 0
+        iso_num = {'>=2':0,'>=3':0,'>=5':0,'>=10':0}
+        rat_num = {'>=0.02':0,'>=0.03':0,'>=0.05':0,'>=0.1':0,'>=0.15':0,'>=0.2':0}
+        for line in fin:
+            read_id,read_len,read_chr,read_strand,read_idx_str,read_donor_str,read_acceptor_str = line.split('\t')
+            read_acceptor_str = read_acceptor_str.strip()
+            if not read_id =="read_id":
+                read_n += 1
+                read_idx = [int(i) for i in read_idx_str.split(',')]
+                read_ja,read_rj = correct_dn_ac(read_donor_str,read_acceptor_str)
+                read_d_rc = read(read_id,int(read_len),read_chr,read_strand,read_idx,read_ja,read_rj,read_donor_str,read_acceptor_str)
+                overlap,oc_cover = overlap_genes(oc_cover,read_d_rc)
+                if not overlap:
+                    gene_cluters = oc_to_gc(oc_cover)
+                    for gene_r in gene_cluters:
+#                        print("gene----------")
+                        gene_n += 1
+                        gene_aboundence = len(gene_r.reads)
+                        gene_trans = cluster_trans(gene_r,mis,ebt,ibt)
+                        for trans in gene_trans.trans_reads:
+#                            print("trans-------------")
+                            trans_n += 1
+                            trans_aboundance = len(trans)
+                            statistic_list(iso_num,trans_aboundance)
+                            statistic_rat(rat_num,trans_aboundance/gene_aboundence)
+                            for read_d_rc2 in trans:
+#                                print_read(read_d_rc2.axis)
+                                fout.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(read_d_rc2.id,read_d_rc2.length,'gene_'+str(gene_n),gene_aboundence,'isoform_'+str(trans_n),trans_aboundance,len(read_d_rc2.axis)//2,read_d_rc2.donor,read_d_rc2.acceptor))
+                    overlap,oc_cover = overlap_genes('',read_d_rc)
+        gene_cluters = oc_to_gc(oc_cover)
+        for gene_r in gene_cluters:
+            gene_n += 1
+            gene_aboundence = len(gene_r.reads)
+            gene_trans = cluster_trans(gene_r,mis,ebt,ibt)
+            for trans in gene_trans.trans_reads:
+                trans_n += 1
+                trans_aboundance = len(trans)
+                statistic_list(iso_num,trans_aboundance)
+                statistic_rat(rat_num,trans_aboundance/gene_aboundence)
+                for read_d_rc2 in trans:
+                    fout.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(read_d_rc2.id,read_d_rc2.length,'gene_'+str(gene_n),gene_aboundence,'isoform_'+str(trans_n),trans_aboundance,len(read_d_rc2.axis)//2,read_d_rc2.donor,read_d_rc2.acceptor))
+    print("Alignments number:{}.".format(read_n))
+    print("Gene_loci number: {}.".format(gene_n))
+    print("Isoform number: {}.".format(trans_n))
+    return iso_num,rat_num
+
+
+def statistic_list(c_d,i):
+    if i >= 10:
+        c_d['>=2'] += 1 ; c_d['>=3'] += 1 ; c_d['>=5'] += 1 ; c_d['>=10'] += 1
+    elif i >= 5:
+        c_d['>=2'] += 1 ; c_d['>=3'] += 1 ; c_d['>=5'] += 1
+    elif i >= 3:
+        c_d['>=2'] += 1 ; c_d['>=3'] += 1 
+    elif i >= 2:
+        c_d['>=2'] += 1
+
+
+def statistic_rat(c_d,i):
+    if i >= 0.2:
+        c_d['>=0.02'] += 1 ; c_d['>=0.03'] += 1 ; c_d['>=0.05'] += 1 ; c_d['>=0.1'] += 1 ; c_d['>=0.15'] += 1 ; c_d['>=0.2'] += 1
+    elif i >= 0.15:
+        c_d['>=0.02'] += 1 ; c_d['>=0.03'] += 1 ; c_d['>=0.05'] += 1 ; c_d['>=0.1'] += 1 ; c_d['>=0.15'] += 1
+    elif i >= 0.1:
+        c_d['>=0.02'] += 1 ; c_d['>=0.03'] += 1 ; c_d['>=0.05'] += 1 ; c_d['>=0.1'] += 1
+    elif i >= 0.05:
+        c_d['>=0.02'] += 1 ; c_d['>=0.03'] += 1 ; c_d['>=0.05'] += 1
+    elif i >= 0.03:
+        c_d['>=0.02'] += 1 ; c_d['>=0.03'] += 1
+    elif i >= 0.02:
+        c_d['>=0.02'] += 1
+
+
+usage = '''Cluster the transcript reads based on the information extacted by bam_parser.
+      
+Usage:
+read_cluster --parsed_file path_to_tsv --cluster_file path_to_output
+
+Input files:
+    -i  , --parsed_file:      Path to the tsv file outputted by bam_parser. (Required)
+
+Output file:
+    -o  , --cluster_file:     Path to the output file that include cluster information. (Required)
+
+Cluster parameter:
+    -ebt, --exon_boundary_tolerance        Three prime exons boundary tolerance.(default = 15)
+    -ibt, --introns_boundary_tolerance     Internal introns boundary tolerance.(default = 3)
+    -msi, --minimum_size_of_intron         Introns with a length below this value are ignored.(default = 30)
+
+Additional options:
+    -h , --help:              Display this help message.
+'''
+
+if __name__ == '__main__':
+
+    import argparse
+    parser = argparse.ArgumentParser(description='Cluster the transcript reads based on the information extacted by bam_parser.')
+    parser.add_argument('-i',"--parsed_file",required=True,help="Path to the tsv file outputted by bam_parser. (Required)")
+    parser.add_argument('-o',"--cluster_file",required=True,help="Path to the output file required that include cluster information. (Required)")
+    parser.add_argument('-ebt','--exon_boundary_tolerance',type=int,default=15,help="Three prime exons boundary tolerance.(default = 15)")
+    parser.add_argument('-ibt','--introns_boundary_tolerance',type=int,default=3,help="Internal introns boundary tolerance.(default = 3)")
+    parser.add_argument('-msi','--minimum_size_of_intron',type=int,default=30,help="Introns with a length below this value are ignored.(default = 30)")
+    parser.add_argument('-dn','--standard_donor',default='GT,GC,AT',help="Standard donor of splice junctions,set off with commas.(default = GT,GC,AT)")
+    parser.add_argument('-ac','--standard_acceptor',default='AG,AC',help="Standard acceptor of splice junctions.(default = AG,AC)")
+
+    parser.format_usage = lambda : usage
+    parser.format_help = parser.format_usage
+
+    args =  parser.parse_args()
+    dn = args.standard_donor.split(',')
+    ac = args.standard_acceptor.split(',')
+    correct_dn_ac.right_donor = dn
+    correct_dn_ac.right_acceptor = ac
+    iso_d,rat_d = read_cluster(args.parsed_file,args.cluster_file,args.minimum_size_of_intron,args.exon_boundary_tolerance,args.introns_boundary_tolerance)
+    print("Isoform number (abundance >=2): {}.".format(iso_d['>=2']))
+    print("Isoform number (abundance >=3): {}.".format(iso_d['>=3']))
+    print("Isoform number (abundance >=5): {}.".format(iso_d['>=5']))
+    print("Isoform number (abundance >=10): {}.".format(iso_d['>=10']))
+    print("Isoform number (ratio >=0.02): {}.".format(rat_d['>=0.02']))
+    print("Isoform number (ratio >=0.03): {}.".format(rat_d['>=0.03']))
+    print("Isoform number (ratio >=0.05): {}.".format(rat_d['>=0.05']))
+    print("Isoform number (ratio >=0.1): {}.".format(rat_d['>=0.1']))
+    print("Isoform number (ratio >=0.15): {}.".format(rat_d['>=0.15']))
+    print("Isoform number (ratio >=0.2): {}.".format(rat_d['>=0.2']))
+    

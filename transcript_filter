@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+
+from pysam import AlignmentFile
+
+def phase_cigar_table(starts0,cigar_t):
+    axis_l = []
+    axis_l.append(starts0 + 1)
+    for operation,length in cigar_t:
+        if operation in [0,2,7,8]:
+            starts0 += length
+        elif operation == 3:
+            axis_l.append(starts0)
+            starts0 += length
+            axis_l.append(starts0 + 1)
+    axis_l.append(starts0)
+    return axis_l
+
+
+def read_cluster(infile,ab,gb,sb,fr,ej):
+    isoform_pid = 'isoform_id'
+    isoform_d = {}
+    read_n = -1
+    isoform_n = 0
+    ia_filtered = 0
+    ej_filtered = 0
+    ga_filtered = 0
+    sb_filtered = 0
+    fr_filtered = 0
+    with open(infile,'r') as fin:
+        for line in fin:
+            read_id,x,gene_id,gene_abundance,isoform_id,isoform_abundance,exon_number,read_donor_str,read_acceptor_str = line.split('\t')
+            read_n += 1
+            if isoform_id != isoform_pid:
+                isoform_n += 1
+                isoform_pid = isoform_id
+                read_acceptor_str = read_acceptor_str.strip()
+                iso_ab = int(isoform_abundance)
+                gene_ab = int(gene_abundance)
+                exon_number = int(exon_number)
+                all_junction,right_j = correct_dn_ac(read_donor_str,read_acceptor_str)
+                if iso_ab < ab:
+                    ia_filtered += 1
+                elif gene_ab < gb:
+                    ga_filtered += 1
+                elif exon_number == 1 and iso_ab < sb:
+                    sb_filtered += 1
+                elif iso_ab/gene_ab < fr:
+                    fr_filtered += 1
+                elif (all_junction - right_j) > ej:
+                    ej_filtered += 1
+                else:
+                    isoform_d[read_id] = [gene_id,isoform_id,iso_ab]
+    print("Number of Alignments:{}.".format(read_n))
+    print("Number of Isoforms:{}.".format(isoform_n))
+    print("Filtered out by isoform_abundance: {}.".format(ia_filtered))
+    print("Filtered out by abundance_of_isoform_with_single_exon: {}.".format(sb_filtered))
+    print("Filtered out by ratio_of_isoform: {}.".format(fr_filtered))
+    print("Filtered out by erroneous_junction: {}.".format(ej_filtered))
+    print("Number of filtered Isoforms: {}.".format(len(isoform_d)))
+    return isoform_d
+
+def correct_dn_ac(dn_str,ac_str):
+    if not dn_str:
+        return 0,0
+    dn_l = dn_str.split(',')
+    ac_l = ac_str.split(',')
+    allsite = len(dn_l) + len(ac_l)
+    correct = 0
+    for d in dn_l:
+        if d in correct_dn_ac.right_donor:
+            correct += 1
+    for a in ac_l:
+        if a in correct_dn_ac.right_acceptor:
+            correct += 1
+    return allsite,correct
+
+
+def parser_bam(bam_name,isoform_d,fa_file,gff_file):
+    bam_file = AlignmentFile(bam_name,'rb')
+    fa = open(fa_file,'w')
+    gff = open(gff_file,'w')
+    gff.write('##gff-version 3\n')
+    gene_d = {}
+    for readx in bam_file:
+        read_id = readx.query_name
+        if not read_id in isoform_d:
+            continue
+        gene_id,isoform_id,isoform_ab = isoform_d[read_id]
+        read_align_seq = readx.query_alignment_sequence
+        fa.write('>{} {} {}\n'.format(read_id,gene_id,isoform_id))
+        fa.write('{}\n'.format(read_align_seq))
+        read_chr = bam_file.get_reference_name(readx.reference_id)
+        if ('0000' + bin(readx.flag))[-5] == '1':
+            read_strand = '-'
+        else:
+            read_strand = '+'
+        read_pos0 = readx.reference_start
+        read_idx = phase_cigar_table(read_pos0,readx.cigartuples)
+        if not gene_id in gene_d:
+            gff.write('{}\tLRTrans\tgene\t{}\t{}\t.\t{}\t.\tID={};Name={}\n'.format(read_chr,read_idx[0],read_idx[-1],read_strand,gene_id,gene_id))
+            gene_d[gene_id] = [[read_idx[0]],[read_idx[-1]]]
+        else:
+            gene_d[gene_id][0].append(read_idx[0])
+            gene_d[gene_id][1].append(read_idx[-1])
+        gff.write('{}\tLRTrans\tmRNA\t{}\t{}\t.\t{}\t.\tID={};Parent={};Name={}\n'.format(read_chr,read_idx[0],read_idx[-1],read_strand,isoform_id,gene_id,read_id))
+        for ix in range(0,len(read_idx),2):
+            exon_id = isoform_id +'_exon_' + str(ix//2)
+            gff.write('{}\tLRTrans\texon\t{}\t{}\t.\t{}\t.\tID={};Parent={}\n'.format(read_chr,read_idx[ix],read_idx[ix+1],read_strand,exon_id,isoform_id))
+    bam_file.close()
+    fa.close()
+    gff.close()
+    return gene_d
+
+
+def reform_gff(temp_gff,out_gff,gene_d):
+    with open(temp_gff,'r') as fin,open(out_gff,'w') as fout:
+        for line in fin:
+            if line.startswith('#'):
+                fout.write(line)
+            else:
+                line_list = line.split()
+                if line_list[2] != 'gene':
+                    fout.write(line)
+                else:
+                    gene_id = line_list[8].split(';')[0].strip('ID=')
+                    line_list[3] = str(min(gene_d[gene_id][0]))
+                    line_list[4] = str(max(gene_d[gene_id][1]))
+                    fout.write('\t'.join(line_list) + '\n')
+
+
+def construct_count(iso_d,gene_f,iso_f):
+    gene_d = {}
+    with open(gene_f,'w') as gfout, open(iso_f,'w') as isofout:
+        gfout.write("gene_id,count\n")
+        isofout.write("isoform_id,count\n")
+        for gene_id,isoform_id,isoform_ab in iso_d.values():
+            isofout.write("{},{}\n".format(isoform_id,isoform_ab))
+            if gene_id in gene_d:
+                gene_d[gene_id] += isoform_ab
+            else:
+                gene_d[gene_id] = isoform_ab
+        print("Number of gene loci: {}.".format(len(gene_d)))
+        for k,v in gene_d.items():
+            gfout.write("{},{}\n".format(k,v))
+
+
+
+usage = '''This script will construct transcriptoms(GFF3) and representative sequence(fasta) using the result of read_cluster.
+
+Usage:
+transcript_filter --cluster_file path_to_tsv --bam_file path_to_bam --out_prefix path_to_out
+
+Input files:
+    -i , --cluster_file:    Path to the tsv file outputted by read_cluster. (Required)
+    -b , --bam_file:        Path to the input bam file. (Required)
+
+Output file:
+    -op, --out_prefix      Prefix/path to the output files. (Required)
+
+filter parameter:
+    -dn , --standard_donor        Standard donor of splice junctions,set off with commas.(default = GT,GC,AT)
+    -ac , --standard_acceptor     Standard acceptor of splice junctions.(default = AG,AC)
+    -ia , --isoform_abundance     Isoform whose abundance is below this value will be filtered.(default = 3)
+    -sa , --single_exon_abundance Isoform with single exon will be filtered if its abundance is lower than this value.(default = 3)
+    -fr , --filter_by_ratio       The minimum ratio of the isoform abundance in the parent gene locus in clusting.(default = 0.05)
+    -ej , --erroneous_junction    Isoform whose number of erroneous junction is above this value will be filtered.(default = 0)
+
+Additional options:
+    -h , --help:            Display this help message.
+'''
+
+if __name__ == '__main__':
+
+    import argparse
+    parser = argparse.ArgumentParser(description='Cluster the transcript reads based on the information extacted by bam_parser.')
+    parser.add_argument('-i',"--cluster_file",required=True,help="Path to the tsv file outputted by read_cluster. (Required)")
+    parser.add_argument('-b',"--bam_file",required=True,help="Path to the input bam file. (Required)")
+    parser.add_argument('-op',"--out_prefix",required=True,help="Prefix/path to the output files. (Required)")
+    parser.add_argument('-dn','--standard_donor',default='GT,GC,AT',help="Standard donor of splice junctions,set off with commas.(default = GT,GC,AT)")
+    parser.add_argument('-ac','--standard_acceptor',default='AG,AC',help="Standard acceptor of splice junctions.(default = AG,AC)")
+    parser.add_argument('-ia','--isoform_abundance',type=int,default=3,help="Isoform whose abundance is below this value will be filtered.(default = 3)")
+    parser.add_argument('-ga','--gene_abundance',type=int,default=0,help="")
+    parser.add_argument('-sa','--single_exon_abundance',type=int,default=3,help="Isoform with single exon will be filtered if its abundance is lower than this value.(default = 3)")
+    parser.add_argument('-fr','--filter_by_ratio',type=float,default=0.0,help="The minimum ratio of the isoform abundance in the parent gene locus in clusting.(default = 0.05)")
+    parser.add_argument('-ej','--erroneous_junction',type=int,default=0,help="Isoform whose number of erroneous junction is above this value will be filtered.(default = 0)")
+
+    parser.format_usage = lambda : usage
+    parser.format_help = parser.format_usage
+
+    args =  parser.parse_args()
+    dn = args.standard_donor.split(',')
+    ac = args.standard_acceptor.split(',')
+    correct_dn_ac.right_donor = dn
+    correct_dn_ac.right_acceptor = ac
+    fa_file_name = args.out_prefix+'.fa'
+    gff_file_name = args.out_prefix + '.gff'
+    gene_count_name = args.out_prefix + '.gene_count.csv'
+    isoform_count_name = args.out_prefix + '.isoform_count.csv'
+    stat_name = args.out_prefix + '.stat'
+    print("Input cluster_file: {}.".format(args.cluster_file))
+    print("Input sorted_bam_file: {}.".format(args.bam_file))
+    print("Output representative sequence file: {}.".format(fa_file_name))
+    print("Output transcriptoms file: {}.".format(gff_file_name))
+    print("Output gene_count file: {}.".format(gene_count_name))
+    print("Output isoform_count file: {}.".format(isoform_count_name))
+    isoforms = read_cluster(args.cluster_file,args.isoform_abundance,args.gene_abundance,args.single_exon_abundance,args.filter_by_ratio,args.erroneous_junction,)
+    construct_count(isoforms,gene_count_name,isoform_count_name)
+    gene_site = parser_bam(args.bam_file,isoforms,fa_file_name,gff_file_name + '.temp')
+    reform_gff(gff_file_name + '.temp',gff_file_name,gene_site)
+    import os
+    os.remove(gff_file_name + '.temp')

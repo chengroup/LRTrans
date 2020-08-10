@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+
+from pysam import AlignmentFile
+from Bio import SeqIO
+
+
+class read:
+    def __init__(self,c,s,r,a):
+        self.chrom = c
+        self.strand = s
+        self.read_id = r
+        self.axis = a
+
+
+def intro_err_del(read_l,mis):
+    for read_d in read_l:
+        site_num = len(read_d.axis)
+        if site_num >= 4:
+            for idx in range(site_num-2,0,-2):
+                if abs(read_d.axis[idx] - read_d.axis[idx -1]) < mis:
+                    del read_d.axis[idx]
+                    del read_d.axis[idx - 1]
+    return read_l
+
+
+def phase_cigar_table(starts0,cigar_t):
+    axis_l = []
+    axis_l.append(starts0 + 1)
+    for operation,length in cigar_t:
+        if operation in [0,2,7,8]:
+            starts0 += length
+        elif operation == 3:
+            axis_l.append(starts0)
+            starts0 += length
+            axis_l.append(starts0 + 1)
+    axis_l.append(starts0)
+    return axis_l
+
+
+reference_record =''
+#
+#print("Load Reference Successfully")
+def donor_acceptor_extract(read_d):
+#    print('{}\t{}\t{}\t{}\n'.format(read_d.chrom,read_d.strand,read_d.axis,read_d.read_id),end="")
+    Donor_list = []
+    Acceptor_list = []
+    site_num = len(read_d.axis)
+    if site_num < 4:
+        return Donor_list,Acceptor_list
+    if donor_acceptor_extract.chrom != read_d.chrom:
+        donor_acceptor_extract.chrom = read_d.chrom
+        donor_acceptor_extract.sequence = reference_record[read_d.chrom].seq
+    if read_d.strand == '-':
+        for idx in range(1,site_num-2,2):
+            acc = str(donor_acceptor_extract.sequence[read_d.axis[idx]:read_d.axis[idx]+2].reverse_complement()).upper()
+            Acceptor_list.append(acc)
+        for idx in range(2,site_num,2):
+            don = str(donor_acceptor_extract.sequence[read_d.axis[idx]-3:read_d.axis[idx]-1].reverse_complement()).upper()
+            Donor_list.append(don)
+    else:
+        for idx in range(1,site_num-2,2):
+            don = str(donor_acceptor_extract.sequence[read_d.axis[idx]:read_d.axis[idx]+2]).upper()
+            Donor_list.append(don)
+        for idx in range(2,site_num,2):
+            acc = str(donor_acceptor_extract.sequence[read_d.axis[idx]-3:read_d.axis[idx]-1]).upper()
+            Acceptor_list.append(acc)
+#    print('{}\t{}\n'.format(','.join(Donor_list),','.join(Acceptor_list)),end="")
+    return Donor_list,Acceptor_list
+
+donor_acceptor_extract.chrom = ''
+donor_acceptor_extract.sequence = ''
+
+
+def parser_bam(bam_name,out_file):
+    trace = ['',0]
+    bam_file = AlignmentFile(bam_name,'rb')
+    print("Start parsing the sorted bam file:{}".format(bam_name))
+    print("The parsing results are written to {}".format(out_file))
+    fout = open(out_file,'w')
+    fout.write('read_id\tread_length\tread_chr\tread_strand\tread_pos\tDonor\tAcceptor\n')
+    read_number = 0
+    for readx in bam_file:
+        read_id = readx.query_name
+        read_len = readx.query_length
+        read_chr = bam_file.get_reference_name(readx.reference_id)
+        if ('0000' + bin(readx.flag))[-5] == '1':
+            read_strand = '-'
+        else:
+            read_strand = '+'
+        read_pos0 = readx.reference_start
+        read_idx = phase_cigar_table(read_pos0,readx.cigartuples)
+        if trace[0] == read_chr and read_pos0 < trace[1]:
+            raise Exception('{}\nBAM file should be sorted!'.format(read_id))
+        trace = [read_chr,read_pos0]
+#        print(read_id,read_chr,read_strand,read_idx)
+        read_d = read(read_chr,read_strand,read_id,read_idx)
+        Donor_l,Acceptor_l = donor_acceptor_extract(read_d)
+        fout.write('{}\t{}\t{}\t{}\t{}\t{}\t{}\n'.format(read_id,read_len,read_chr,read_strand,','.join([str(i) for i in read_idx]),','.join(Donor_l),','.join(Acceptor_l)))
+        read_number += 1
+#        print('{}\t{}\t{}\t{}\t{}\t{}\n'.format(read_id,read_chr,read_strand,','.join([str(i) for i in read_idx]),','.join(Donor_l),','.join(Acceptor_l)),end = '')
+    print("{} Alignments are parsed.".format(read_number))
+    bam_file.close()
+    fout.close()
+
+usage = '''Parser of SORTED BAM file that is derived from the mapped long-read transcripts.
+
+Note:This script is based on the 'N' operation in CIGAR to identify splice.
+
+Usage:
+bam_parser --sorted_bam_file path_to_bam --reference_file path_to_fasta --parsed_file path_to_output
+
+Input files:
+    -i , --sorted_bam_file:    Path to the input bam file. (Required)
+    -r , --reference_file:     Path to the reference fasta file used to extact splice junction.(Required)
+
+Output file:
+    -o , --parsed_file:        Path to the output file required by the cluster program. (Required)
+
+Additional options:
+    -h , --help:               Display this help message.
+'''
+
+if __name__ == '__main__':
+
+    import argparse
+    parser = argparse.ArgumentParser(description='Parser of SORTED BAM file that is derived from the mapped long-read transcripts.')
+    parser.add_argument('-i',"--sorted_bam_file",required=True,help="Path to the input bam file. (Required)")
+    parser.add_argument('-r',"--reference_file",required=True,help="Path to the reference fasta file used to extact splice junction.(Required)")
+    parser.add_argument('-o',"--parsed_file",required=True,help="Path to the output file required by the cluster program. (Required)")
+    parser.format_usage = lambda : usage
+    parser.format_help = parser.format_usage
+
+    args =  parser.parse_args()
+    reference_record = SeqIO.index(args.reference_file, "fasta")
+    print("Reference {} Loaded.".format(args.reference_file))
+    parser_bam(args.sorted_bam_file,args.parsed_file)
