@@ -9,6 +9,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 #
+# Contact: Dr. Shi-Yi Chen, sychensau@gmail.com
 
 # STEPS
 After preprocessing steps such as quality control and error correction, 
