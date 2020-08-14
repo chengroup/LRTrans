@@ -1,5 +1,5 @@
-# This file is part of LRTrans which is a toolset for clustering, 
-# filtering and quantifying the mapped long-read transcripts.
+# This file is part of LRTrans which is a toolset for clustering 
+# and filtering the aligned long-read transcript sequences
 #
 # LRTrans include three python scripts:
 # (1)bam_parser   (2)read_cluster   (3)transcript_filter
